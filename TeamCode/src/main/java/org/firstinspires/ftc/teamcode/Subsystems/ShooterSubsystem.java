@@ -37,7 +37,7 @@ public class ShooterSubsystem {
 
     // --- Turret Calibration ---
     private final double TURRET_RANGE_DEG     = 360.0; // The total physical degrees the turret is capable of spinning.
-    private final double TURRET_CENTER_POS    = 0.83; // The servo position (0 to 1) that represents physical "Forward".
+    private final double TURRET_CENTER_POS    = 0.805; // The servo position (0 to 1) that represents physical "Forward".
 
     // --- Motor Speed Control (PIDF) ---
     // P (Proportional) helps the motor reach speed quickly; F (Feedforward) maintains speed based on voltage.
@@ -116,60 +116,57 @@ public class ShooterSubsystem {
      */
     public void update(Pose pose, Vector velocity, double goalX, double goalY, Telemetry telemetry) {
 
-        // 1. Calculate current distance to the target for initial flight time estimation.
-        double currentDx = goalX - pose.getX();
-        double currentDy = goalY - pose.getY();
-        double currentDistance = Math.hypot(currentDx, currentDy);
+        // 1. Calculate current distance to the target.
+        double dx       = goalX - pose.getX();
+        double dy       = goalY - pose.getY();
+        double distance = Math.hypot(dx, dy);
 
-        // 2. Predict Future Position: Lead compensation.
-        double flightTime = currentDistance / PROJECTILE_SPEED_IPS;
+        // 2. Predict Future Position: If we are driving, the ball needs to be aimed where the goal WILL be
+        // relative to us by the time the ball finishes its flight.
+        double flightTime = distance / PROJECTILE_SPEED_IPS; // Time in seconds for the ball to travel.
         double futureX    = pose.getX() + velocity.getXComponent() * flightTime;
         double futureY    = pose.getY() + velocity.getYComponent() * flightTime;
 
-        // 3. Aim Turret: Calculate vector from predicted robot position to goal.
-        double targetDx = goalX - futureX;
-        double targetDy = goalY - futureY;
-        double localizationAngle = Math.toDegrees(Math.atan2(targetDy, targetDx))
+        // 3. Aim Turret: Calculate the angle to the goal, then subtract the robot's current heading.
+        dx = goalX - futureX;
+        dy = goalY - futureY;
+        double localizationAngle = Math.toDegrees(Math.atan2(dy, dx))
                 - Math.toDegrees(pose.getHeading());
-        localizationAngle = wrapAngle(localizationAngle);
-        setTurretAngle(localizationAngle);
+        localizationAngle = wrapAngle(localizationAngle); // Ensure angle is within -180 to +180.
+        setTurretAngle(localizationAngle); // Rotate the servos.
 
-        // 4. Calculate Power & Trajectory: Use the distance from the *predicted* release point.
-        double futureDistance = Math.hypot(targetDx, targetDy);
-        double baseRPM        = getRPM(futureDistance);
-        double baseHoodPos    = getHoodAngle(futureDistance);
+        // 4. Calculate Power & Trajectory: Look up the RPM and Hood Angle for the *predicted* future distance.
+        double futureDx      = goalX - futureX;
+        double futureDy      = goalY - futureY;
+        double futureDistance = Math.hypot(futureDx, futureDy);
 
-        // 5. Shot Recovery: Compensate for RPM drop when a ball passes through the flywheels.
-        double currentRPM = (flywheel1.getVelocity()) * 60.0 / ENCODER_CPR;
+        double targetRPM     = getRPM(futureDistance);
+        double hoodPos       = Math.max(0.0, Math.min(0.4, getHoodAngle(futureDistance)));
 
-        // Calculate the drop relative to the base RPM.
-        double rpmDrop       = Math.max(0.0, baseRPM - currentRPM);
-        double targetRPM     = baseRPM;
-        double compensation  = 0;
-
-        // Only apply boost if the motor is already near its target (e.g., > 75% speed).
-        // This prevents the target from "climbing" to high values during initial spin-up.
-        if (currentRPM > baseRPM * 0.75) {
-            targetRPM    = baseRPM + (rpmDrop * RPM_BOOST_SCALE);
-            compensation = rpmDrop * HOOD_RPM_COMPENSATION_SCALE;
-        }
-
-        double hoodPos = Math.max(0.0, Math.min(0.4, baseHoodPos - compensation));
+        // 5. Shot Recovery: If the motors slow down because a ball just went through,
+        // temporarily boost the target RPM and adjust the hood to stay accurate.
+        double currentRPM    = (flywheel1.getVelocity()) * 60.0 / ENCODER_CPR; // Calculate RPM from motor velocity.
+        double rpmDrop       = Math.max(0.0, targetRPM - currentRPM); // Measure how much we've slowed down.
+        targetRPM         = targetRPM + (rpmDrop * RPM_BOOST_SCALE); // Apply boost.
+        double compensation  = rpmDrop * HOOD_RPM_COMPENSATION_SCALE;
+        hoodPos = Math.max(0.0, Math.min(0.4, hoodPos - compensation)); // Adjust hood.
 
         // 6. Execute: Command the motors and servos to their calculated states.
         hoodServo2.setPosition(hoodPos);
-        double velocityTPS = targetRPM * ENCODER_CPR / 60.0;
+        double velocityTPS = targetRPM * ENCODER_CPR / 60.0; // Convert RPM back to Ticks Per Second for the motor.
         flywheel1.setVelocity(velocityTPS);
         flywheel2.setVelocity(velocityTPS);
 
         // Debugging output for the driver station.
-        telemetry.addData("[Shooter] Distance",        "%.1f in", currentDistance);
-        telemetry.addData("[Shooter] Base RPM",        "%.0f",    baseRPM);
+        telemetry.addData("[Shooter] Distance",        "%.1f in", distance);
+        telemetry.addData("[Shooter] Hood Position",   "%.4f",    hoodPos);
+        telemetry.addData("[Shooter] Hood Compensation","%.4f",   compensation);
+        telemetry.addData("[Shooter] Future Distance",   "%.4f",   futureDistance);
+        telemetry.addData("[Shooter] RPM Drop",        "%.0f",    rpmDrop);
         telemetry.addData("[Shooter] Target RPM",      "%.0f",    targetRPM);
         telemetry.addData("[Shooter] Current RPM",     "%.0f",    currentRPM);
-        telemetry.addData("[Shooter] RPM Drop",        "%.0f",    rpmDrop);
-        telemetry.addData("[Shooter] Hood Position",   "%.4f",    hoodPos);
-        telemetry.addData("[Shooter] Turret Angle",    "%.2f°",   currentTurretAngle);
+        telemetry.addData("[Shooter] get hood angle     "," %.4f",    getHoodAngle(futureDistance));
+        telemetry.addData("[Shooter] Turret Cmd",      "%.2f°",   currentTurretAngle);
     }
 
     /**
